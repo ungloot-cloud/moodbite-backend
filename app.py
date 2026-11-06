@@ -11,7 +11,7 @@ import random
 app = Flask(__name__)
 CORS(app) 
 
-# 你的 Neon 数据库连接信息（已直接填入）
+# 你的 Neon 数据库连接信息
 DEFAULT_DB_URL = "postgresql://neondb_owner:npg_aMHZtF4wo2nK@ep-tiny-thunder-aos3eit7.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 DATABASE_URL = os.environ.get("DATABASE_URL", DEFAULT_DB_URL)
 
@@ -19,7 +19,7 @@ def get_db_connection():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     return conn
 
-# --- 1. 初始化 PostgreSQL 数据库表 ---
+# 1. 初始化 PostgreSQL 数据库表
 def init_db():
     try:
         conn = get_db_connection()
@@ -37,13 +37,12 @@ def init_db():
         conn.commit()
         cursor.close()
         conn.close()
-        print("✅ 成功连接到 Neon PostgreSQL 数据库")
     except Exception as e:
-        print(f"❌ 数据库连接失败: {e}")
+        print(f"Database init error: {e}")
 
 init_db()
 
-# --- 2. 食物数据库 ---
+# 2. 食物数据库 (30 items)
 DISHES = [
     {"name": "Miso mushroom noodles", "emoji": "🍜", "veg": True, "type": "comfort"},
     {"name": "Tomato soup & toast", "emoji": "🍅", "veg": True, "type": "comfort"},
@@ -81,13 +80,13 @@ DISHES = [
 
 dish_lookup = {d["name"]: {"id": i+1, "emoji": d["emoji"], "veg": d["veg"]} for i, d in enumerate(DISHES)}
 
+# 3. 核心算法
 def get_live_ml_recommendations(user_id, mood, diet):
     try:
         conn = get_db_connection()
         df = pd.read_sql_query("SELECT user_id, dish_name, rating FROM feedback", conn)
         conn.close()
-    except Exception as e:
-        print(f"数据库读取失败: {e}")
+    except:
         df = pd.DataFrame()
     
     # --- COLD START FALLBACK ---
@@ -150,6 +149,7 @@ def get_live_ml_recommendations(user_id, mood, diet):
         if len(results) == 3: break
     return results, "Collaborative Filtering (Live Cosine Similarity)"
 
+# 4. API Routes
 @app.route('/api/recommendations', methods=['POST'])
 def recommend():
     data = request.json
@@ -181,10 +181,34 @@ def feedback():
         cursor.close()
         conn.close()
     except Exception as e:
-        print(f"写入数据库失败: {e}")
-        return jsonify({"status": "error", "message": "Database write failed"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
         
     return jsonify({"status": "success", "message": "Live ML model updated!"})
+
+# 开发者模式专用：获取数据库数据
+@app.route('/api/debug_database/<user_id>', methods=['GET'])
+def debug_database(user_id):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, dish_name, rating, mood, timestamp FROM feedback WHERE user_id = %s ORDER BY timestamp DESC LIMIT 10", (user_id,))
+        rows = cursor.fetchall()
+        
+        results = []
+        for row in rows:
+            results.append({
+                "user_id": row[0],
+                "dish_name": row[1],
+                "rating": row[2],
+                "mood": row[3],
+                "timestamp": str(row[4])
+            })
+            
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "success", "database": "Neon PostgreSQL", "rows": results})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
