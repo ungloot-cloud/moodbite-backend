@@ -133,7 +133,7 @@ def get_live_ml_recommendations(user_id, mood, diet):
             predicted_rating = (sim_scores * ratings).sum() / sim_scores.sum()
             predictions[item] = predicted_rating
             
-    if len(predictions) < 3:
+    if len(predictions) == 0:
         return get_live_ml_recommendations("NEW_USER_" + user_id, mood, diet)
         
     top_items = sorted(predictions.items(), key=lambda x: x[1], reverse=True)
