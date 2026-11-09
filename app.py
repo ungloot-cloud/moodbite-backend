@@ -11,7 +11,7 @@ import random
 app = Flask(__name__)
 CORS(app) 
 
-# SECURITY: Read from Render Environment Variables
+# SECURITY: Read from Render Environment Variables. 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     print("⚠️ CRITICAL WARNING: DATABASE_URL environment variable is missing!")
@@ -24,6 +24,7 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # 1. Feedback Table for Collaborative Filtering
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS feedback (
                 id SERIAL PRIMARY KEY,
@@ -31,6 +32,16 @@ def init_db():
                 dish_name TEXT,
                 rating INTEGER,
                 mood TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        # 2. Crowdsourcing Tags Table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS food_tags (
+                id SERIAL PRIMARY KEY,
+                dish_name TEXT,
+                tag TEXT,
+                user_id TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -65,7 +76,6 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         df = pd.read_sql_query("SELECT user_id, dish_name, rating FROM feedback", conn)
         conn.close()
     except Exception as e:
-        print(f"DB Read Error: {e}")
         df = pd.DataFrame()
     
     # --- COLD START: CONTEXT-AWARE WEIGHTED SCORING ---
@@ -74,21 +84,18 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         scored_pool = []
         
         for d in DISHES:
-            if diet == 'vegetarian' and not d["veg"]:
-                continue
+            if diet == 'vegetarian' and not d["veg"]: continue
             
             # 1. Explicit Signal (Mood)
             score = mood_weights.get(d["type"], 0.5)
             
             # 2. Implicit Signals (Weather & Time)
             if weather == 'rainy' or time_of_day == 'late_night':
-                if d["type"] in ['comfort', 'reward']:
-                    score += 1.5 # Boost warm/heavy food
+                if d["type"] in ['comfort', 'reward']: score += 1.5
             elif weather == 'sunny' or time_of_day == 'morning':
-                if d["type"] == 'healthy':
-                    score += 1.5 # Boost light/healthy food
+                if d["type"] == 'healthy': score += 1.5
             
-            # 3. Exploration Noise
+            # 3. Exploration Noise (Epsilon-Greedy)
             score += random.uniform(0, 0.3) 
             scored_pool.append((d, score))
             
@@ -119,7 +126,6 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
             predictions[item] = (sim_scores * ratings).sum() / sim_scores.sum()
             
     if len(predictions) < 3:
-        # Fallback if not enough overlapping data
         return get_live_ml_recommendations("NEW_USER_" + user_id, mood, diet, time_of_day, weather)
         
     top_items = sorted(predictions.items(), key=lambda x: x[1], reverse=True)
@@ -165,12 +171,20 @@ def feedback():
         return jsonify({"status": "error", "message": str(e)}), 500
     return jsonify({"status": "success", "message": "Live ML model updated!"})
 
-@app.route('/api/restaurants', methods=['POST'])
-def get_restaurants():
+@app.route('/api/tag_food', methods=['POST'])
+def tag_food():
     data = request.json
-    dish = data.get('dish_name', 'Food')
-    loc = data.get('location', 'HKUST')
-    return jsonify({"status": "OK", "api_provider": "Google Places API", "results": [{"name": f"HKUST Canteen ({dish})", "address": f"LG7, {loc}", "rating": 4.6, "open_now": True}, {"name": f"The Bistro - {dish}", "address": f"Center, {loc}", "rating": 4.2, "open_now": True}]})
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO food_tags (dish_name, tag, user_id) VALUES (%s, %s, %s)', 
+                       (data.get('dish_name'), data.get('tag'), data.get('user_id', 'Anonymous')))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "success", "message": "Tag saved to community database!"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
