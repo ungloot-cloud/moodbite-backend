@@ -24,7 +24,6 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # 1. Feedback Table for Collaborative Filtering
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS feedback (
                 id SERIAL PRIMARY KEY,
@@ -35,7 +34,6 @@ def init_db():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # 2. Crowdsourcing Tags Table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS food_tags (
                 id SERIAL PRIMARY KEY,
@@ -60,7 +58,6 @@ DISHES = [
 
 dish_lookup = {d["name"]: {"id": i+1, "emoji": d["emoji"], "veg": d["veg"]} for i, d in enumerate(DISHES)}
 
-# Explicit Signal Weights (Mood)
 MOOD_WEIGHTS = {
     "stressed":   {"comfort": 3.0, "reward": 2.5, "healthy": 0.5, "adventurous": 0.5},
     "happy":      {"comfort": 1.5, "reward": 2.0, "healthy": 3.0, "adventurous": 2.0},
@@ -86,23 +83,21 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         for d in DISHES:
             if diet == 'vegetarian' and not d["veg"]: continue
             
-            # 1. Explicit Signal (Mood)
             score = mood_weights.get(d["type"], 0.5)
             
-            # 2. Implicit Signals (Weather & Time)
             if weather == 'rainy' or time_of_day == 'late_night':
                 if d["type"] in ['comfort', 'reward']: score += 1.5
             elif weather == 'sunny' or time_of_day == 'morning':
                 if d["type"] == 'healthy': score += 1.5
             
-            # 3. Exploration Noise (Epsilon-Greedy)
             score += random.uniform(0, 0.3) 
             scored_pool.append((d, score))
             
         scored_pool.sort(key=lambda x: x[1], reverse=True)
         picks = [item[0] for item in scored_pool[:3]]
         
-        results = [{"id": dish_lookup[d["name"]]["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": f"Context match for {mood}."} for d in picks]
+        # REMOVED the "Context match" text here
+        results = [{"id": dish_lookup[d["name"]]["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": ""} for d in picks]
         return results, "Cold Start: Context-Aware Scoring"
 
     # --- WARM START: LIVE COLLABORATIVE FILTERING ---
@@ -134,7 +129,8 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         info = dish_lookup.get(item)
         if not info: continue
         if diet == 'vegetarian' and not info['veg']: continue
-        results.append({"id": info["id"], "name": item, "emoji": info["emoji"], "veg": info["veg"], "desc": f"AI Prediction: {score:.1f}/5 based on taste profile."})
+        # CHANGED to a simpler text
+        results.append({"id": info["id"], "name": item, "emoji": info["emoji"], "veg": info["veg"], "desc": "AI Recommended."})
         if len(results) == 3: break
         
     if len(results) < 3:
