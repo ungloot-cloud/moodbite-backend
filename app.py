@@ -120,10 +120,8 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         scored_pool.sort(key=lambda x: x[1], reverse=True)
         picks = [item[0] for item in scored_pool[:3]]
         
-        top_pick = {"id": picks[0]["id"], "name": picks[0]["name"], "emoji": picks[0]["emoji"], "veg": picks[0]["veg"], "desc": ""}
-        alternatives = [{"id": p["id"], "name": p["name"], "emoji": p["emoji"], "veg": p["veg"], "desc": ""} for p in picks[1:3]]
-        
-        return {"top_pick": top_pick, "alternatives": alternatives}, "Cold Start: Personalized Scoring"
+        results = [{"id": d["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": ""} for d in picks]
+        return results, "Cold Start: Context-Aware Scoring"
 
     # --- WARM START: LIVE COLLABORATIVE FILTERING ---
     matrix = df.pivot_table(index='user_id', columns='dish_name', values='rating')
@@ -158,16 +156,16 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         results_list.append({"id": info["id"], "name": item, "emoji": info["emoji"], "veg": info["veg"], "desc": ""})
         if len(results_list) == 3: break
         
-    # --- FIX: PAD WITH RANDOM UNRATED ITEMS IF CF RETURNS < 3 ---
+    # --- PAD IF < 3 ITEMS ---
     if len(results_list) < 3:
         unrated_pool = [d for d in dynamic_dishes if d["name"] not in user_rated_items and (diet == 'all' or d["veg"])]
         random.shuffle(unrated_pool)
         for d in unrated_pool:
             if d["name"] not in [r["name"] for r in results_list]:
-                results_list.append({"id": d["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": "AI Recommended."})
+                results_list.append({"id": d["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": ""})
             if len(results_list) == 3: break
 
-    return {"top_pick": results_list[0], "alternatives": results_list[1:]}, "Collaborative Filtering (Live Cosine Similarity)"
+    return results_list, "Collaborative Filtering (Live Cosine Similarity)"
 
 @app.route('/api/onboarding', methods=['POST'])
 def onboarding():
