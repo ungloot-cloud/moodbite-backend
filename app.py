@@ -11,14 +11,18 @@ import random
 app = Flask(__name__)
 CORS(app) 
 
-# SECURITY FIX: Prioritize Environment Variable, fallback for local testing
-DEFAULT_DB_URL = "postgresql://neondb_owner:npg_aMHZtF4wo2nK@ep-tiny-thunder-aos3eit7.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-DATABASE_URL = os.environ.get("DATABASE_URL", DEFAULT_DB_URL)
+# SECURITY FIX: Do not hardcode the password. Read from Render Environment Variables.
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if not DATABASE_URL:
+    print("⚠️ CRITICAL WARNING: DATABASE_URL environment variable is missing!")
 
 def get_db_connection():
+    # Ensure connection uses the secure URL
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
+    if not DATABASE_URL: return
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -47,6 +51,16 @@ DISHES = [
 
 dish_lookup = {d["name"]: {"id": i+1, "emoji": d["emoji"], "veg": d["veg"]} for i, d in enumerate(DISHES)}
 
+# UPGRADED: Weighted Content-Based Scoring for Cold Start
+MOOD_WEIGHTS = {
+    "stressed":   {"comfort": 3.0, "reward": 2.5, "healthy": 0.5, "adventurous": 0.5},
+    "happy":      {"comfort": 1.5, "reward": 2.0, "healthy": 3.0, "adventurous": 2.0},
+    "tired":      {"comfort": 3.0, "reward": 2.0, "healthy": 1.0, "adventurous": 0.0},
+    "cozy":       {"comfort": 3.0, "reward": 2.5, "healthy": 1.0, "adventurous": 0.0},
+    "adventurous":{"comfort": 0.5, "reward": 1.0, "healthy": 1.5, "adventurous": 3.0},
+    "balanced":   {"comfort": 1.5, "reward": 1.5, "healthy": 3.0, "adventurous": 1.5}
+}
+
 def get_live_ml_recommendations(user_id, mood, diet):
     try:
         conn = get_db_connection()
@@ -56,19 +70,30 @@ def get_live_ml_recommendations(user_id, mood, diet):
         print(f"DB Read Error: {e}")
         df = pd.DataFrame()
     
-    # COLD START
+    # COLD START: WEIGHTED CONTENT-BASED SCORING
     if df.empty or user_id not in df['user_id'].values:
-        comfort_moods = ['stressed', 'tired', 'cozy']
-        if mood in comfort_moods: valid_types = ['comfort', 'reward']
-        elif mood in ['happy', 'balanced']: valid_types = ['healthy', 'comfort']
-        else: valid_types = ['adventurous', 'healthy']
-        pool = [d for d in DISHES if d["type"] in valid_types]
-        if diet == 'vegetarian': pool = [d for d in pool if d["veg"]]
-        picks = random.sample(pool, min(3, len(pool)))
-        results = [{"id": dish_lookup[d["name"]]["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": f"A great match for your {mood} mood."} for d in picks]
-        return results, "Cold Start: Mood-Based Clustering Applied"
+        mood_weights = MOOD_WEIGHTS.get(mood, MOOD_WEIGHTS["balanced"])
+        scored_pool = []
+        
+        for d in DISHES:
+            if diet == 'vegetarian' and not d["veg"]:
+                continue
+            
+            # Base score from the weight matrix
+            score = mood_weights.get(d["type"], 0.5)
+            
+            # Epsilon-Greedy: Add slight random noise to keep recommendations fresh
+            score += random.uniform(0, 0.5) 
+            scored_pool.append((d, score))
+            
+        # Sort by highest score
+        scored_pool.sort(key=lambda x: x[1], reverse=True)
+        picks = [item[0] for item in scored_pool[:3]]
+        
+        results = [{"id": dish_lookup[d["name"]]["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": f"Content-Based match for {mood}."} for d in picks]
+        return results, "Cold Start: Weighted Content-Based Scoring"
 
-    # COLLABORATIVE FILTERING
+    # WARM START: LIVE COLLABORATIVE FILTERING
     matrix = df.pivot_table(index='user_id', columns='dish_name', values='rating').fillna(0)
     user_similarity = cosine_similarity(matrix)
     sim_df = pd.DataFrame(user_similarity, index=matrix.index, columns=matrix.index)
@@ -97,19 +122,14 @@ def get_live_ml_recommendations(user_id, mood, diet):
         info = dish_lookup.get(item)
         if not info: continue
         if diet == 'vegetarian' and not info['veg']: continue
-        results.append({
-            "id": info["id"], "name": item, "emoji": info["emoji"], "veg": info["veg"],
-            "desc": f"AI Prediction: {score:.1f}/5 based on your taste profile."
-        })
+        results.append({"id": info["id"], "name": item, "emoji": info["emoji"], "veg": info["veg"], "desc": f"AI Prediction: {score:.1f}/5 based on taste profile."})
         if len(results) == 3: break
     return results, "Collaborative Filtering (Live Cosine Similarity)"
 
 @app.route('/api/recommendations', methods=['POST'])
 def recommend():
     data = request.json
-    dishes, logic_used = get_live_ml_recommendations(
-        data.get('user_id', 'Anonymous'), data.get('mood', 'stressed'), data.get('diet', 'all')
-    )
+    dishes, logic_used = get_live_ml_recommendations(data.get('user_id', 'Anonymous'), data.get('mood', 'stressed'), data.get('diet', 'all'))
     return jsonify({"recommendation_id": f"rec_{datetime.now().timestamp()}", "cluster_logic": logic_used, "dishes": dishes})
 
 @app.route('/api/feedback', methods=['POST'])
@@ -120,8 +140,7 @@ def feedback():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO feedback (user_id, dish_name, rating, mood) VALUES (%s, %s, %s, %s)',
-                       (data.get('user_id', 'Anonymous'), data.get('dish_name'), numeric_rating, data.get('mood')))
+        cursor.execute('INSERT INTO feedback (user_id, dish_name, rating, mood) VALUES (%s, %s, %s, %s)', (data.get('user_id', 'Anonymous'), data.get('dish_name'), numeric_rating, data.get('mood')))
         conn.commit()
         cursor.close()
         conn.close()
@@ -129,22 +148,13 @@ def feedback():
         return jsonify({"status": "error", "message": str(e)}), 500
     return jsonify({"status": "success", "message": "Live ML model updated!"})
 
-# FIXED: True API Integration Simulation for Restaurants
+# API Integration Simulation
 @app.route('/api/restaurants', methods=['POST'])
 def get_restaurants():
     data = request.json
     dish = data.get('dish_name', 'Food')
     loc = data.get('location', 'HKUST')
-    
-    # This simulates a real Google Places API response payload
-    return jsonify({
-        "status": "OK",
-        "api_provider": "Google Places API",
-        "results": [
-            {"name": f"HKUST Canteen ({dish})", "address": f"LG7, {loc}", "rating": 4.6, "open_now": True},
-            {"name": f"The Bistro - {dish}", "address": f"Center, {loc}", "rating": 4.2, "open_now": True}
-        ]
-    })
+    return jsonify({"status": "OK", "api_provider": "Google Places API", "results": [{"name": f"HKUST Canteen ({dish})", "address": f"LG7, {loc}", "rating": 4.6, "open_now": True}, {"name": f"The Bistro - {dish}", "address": f"Center, {loc}", "rating": 4.2, "open_now": True}]})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
