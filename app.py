@@ -148,9 +148,6 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         if sim_scores.sum() > 0:
             predictions[item] = (sim_scores * ratings).sum() / sim_scores.sum()
             
-    if len(predictions) == 0:
-        return get_live_ml_recommendations("NEW_USER_" + user_id, mood, diet, time_of_day, weather)
-        
     top_items = sorted(predictions.items(), key=lambda x: x[1], reverse=True)
     
     results_list = []
@@ -161,9 +158,15 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         results_list.append({"id": info["id"], "name": item, "emoji": info["emoji"], "veg": info["veg"], "desc": ""})
         if len(results_list) == 3: break
         
-    if len(results_list) == 0:
-        return get_live_ml_recommendations("NEW_USER_" + user_id, mood, diet, time_of_day, weather)
-        
+    # --- FIX: PAD WITH RANDOM UNRATED ITEMS IF CF RETURNS < 3 ---
+    if len(results_list) < 3:
+        unrated_pool = [d for d in dynamic_dishes if d["name"] not in user_rated_items and (diet == 'all' or d["veg"])]
+        random.shuffle(unrated_pool)
+        for d in unrated_pool:
+            if d["name"] not in [r["name"] for r in results_list]:
+                results_list.append({"id": d["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": "AI Recommended."})
+            if len(results_list) == 3: break
+
     return {"top_pick": results_list[0], "alternatives": results_list[1:]}, "Collaborative Filtering (Live Cosine Similarity)"
 
 @app.route('/api/onboarding', methods=['POST'])
