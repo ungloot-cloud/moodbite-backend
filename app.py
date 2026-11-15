@@ -7,6 +7,7 @@ from datetime import datetime
 import os
 import psycopg2
 import random
+from collections import Counter
 
 app = Flask(__name__)
 CORS(app) 
@@ -99,8 +100,10 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
     
     dynamic_dishes = get_dynamic_dishes()
     
-    # --- COLD START: CONTEXT-AWARE WEIGHTED SCORING ---
-    if df.empty or user_id not in df['user_id'].values:
+    # --- FIX 1 & 2: COLD START & 1x1 MATRIX CRASH ---
+    # If DB is empty OR user doesn't exist OR there is only 1 user in the entire DB
+    unique_users = df['user_id'].unique() if not df.empty else []
+    if df.empty or user_id not in unique_users or len(unique_users) < 2:
         mood_weights = MOOD_WEIGHTS.get(mood, MOOD_WEIGHTS["balanced"])
         scored_pool = []
         
@@ -156,14 +159,42 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         results_list.append({"id": info["id"], "name": item, "emoji": info["emoji"], "veg": info["veg"], "desc": ""})
         if len(results_list) == 3: break
         
-    # --- PAD IF < 3 ITEMS ---
+    # --- FIX 3: SMART TASTE PROFILE PADDING (Replaces Random Shuffle) ---
     if len(results_list) < 3:
-        unrated_pool = [d for d in dynamic_dishes if d["name"] not in user_rated_items and (diet == 'all' or d["veg"])]
-        random.shuffle(unrated_pool)
-        for d in unrated_pool:
-            if d["name"] not in [r["name"] for r in results_list]:
+        # 1. Analyze User's Onboarding Taste Profile
+        user_history = df[df['user_id'] == user_id]
+        liked_types = []
+        for _, row in user_history.iterrows():
+            if row['rating'] >= 4: # If they rated it highly
+                dish_info = next((d for d in dynamic_dishes if d["name"] == row['dish_name']), None)
+                if dish_info:
+                    liked_types.append(dish_info['type'])
+        
+        # 2. Determine their top preferred type
+        if liked_types:
+            top_preferred_type = Counter(liked_types).most_common(1)[0][0]
+            smart_pool = [d for d in dynamic_dishes if d["type"] == top_preferred_type and d["name"] not in user_rated_items and (diet == 'all' or d["veg"])]
+            random.shuffle(smart_pool)
+            for d in smart_pool:
+                if d["name"] not in [r["name"] for r in results_list]:
+                    results_list.append({"id": d["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": ""})
+                if len(results_list) == 3: break
+                
+        # 3. Ultimate Fallback: Use Mood Weights (if no liked types or still not enough)
+        if len(results_list) < 3:
+            mood_weights = MOOD_WEIGHTS.get(mood, MOOD_WEIGHTS["balanced"])
+            remaining_pool = [d for d in dynamic_dishes if d["name"] not in user_rated_items and d["name"] not in [r["name"] for r in results_list] and (diet == 'all' or d["veg"])]
+            
+            # Score the remaining pool by mood so we aren't randomly guessing
+            scored_remaining = []
+            for d in remaining_pool:
+                score = mood_weights.get(d["type"], 0.5) + random.uniform(0, 0.1)
+                scored_remaining.append((d, score))
+            
+            scored_remaining.sort(key=lambda x: x[1], reverse=True)
+            for d, _ in scored_remaining:
                 results_list.append({"id": d["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": ""})
-            if len(results_list) == 3: break
+                if len(results_list) == 3: break
 
     return results_list, "Collaborative Filtering (Live Cosine Similarity)"
 
