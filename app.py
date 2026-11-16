@@ -57,7 +57,6 @@ def init_db():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # NEW TABLE FOR K-MEANS
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_clusters (
                 user_id TEXT PRIMARY KEY,
@@ -86,13 +85,15 @@ MOOD_WEIGHTS = {
     "balanced":   {"comfort": 1.5, "reward": 1.5, "healthy": 3.0, "adventurous": 1.5}
 }
 
-# Use the same defaults for all clusters for now. 
-# Later, you can customize these based on what C1, C2, C3 represent.
+# Use default weights for all clusters initially
 CLUSTER_WEIGHTS = {
     "C1": MOOD_WEIGHTS,
     "C2": MOOD_WEIGHTS,
     "C3": MOOD_WEIGHTS
 }
+
+CACHED_DISHES = None
+LAST_CACHE_UPDATE = None
 
 # ==========================================
 # 3. ML & CLUSTERING FUNCTIONS
@@ -131,7 +132,7 @@ def get_user_cluster(user_id):
 def get_dynamic_dishes():
     global CACHED_DISHES, LAST_CACHE_UPDATE
     now = datetime.now()
-    if 'CACHED_DISHES' in globals() and CACHED_DISHES and LAST_CACHE_UPDATE and (now - LAST_CACHE_UPDATE).seconds < 300:
+    if CACHED_DISHES and LAST_CACHE_UPDATE and (now - LAST_CACHE_UPDATE).seconds < 300:
         return CACHED_DISHES
         
     try:
@@ -148,9 +149,9 @@ def get_dynamic_dishes():
             if row['vote_count'] >= 10 and row['dish_name'] in dynamic_dishes:
                 dynamic_dishes[row['dish_name']]["type"] = row['tag']
                 
-    globals()['CACHED_DISHES'] = list(dynamic_dishes.values())
-    globals()['LAST_CACHE_UPDATE'] = now
-    return globals()['CACHED_DISHES']
+    CACHED_DISHES = list(dynamic_dishes.values())
+    LAST_CACHE_UPDATE = now
+    return CACHED_DISHES
 
 def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
     try:
@@ -163,11 +164,20 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
     dynamic_dishes = get_dynamic_dishes()
     unique_users = df['user_id'].unique() if not df.empty else []
     
-    # --- COLD START PATH (Uses K-Means Clusters) ---
+    # --- COLD START PATH (Cluster + Taste Profile + Context) ---
     if df.empty or user_id not in unique_users or len(unique_users) < 2:
         cluster = get_user_cluster(user_id)
         cluster_weights = CLUSTER_WEIGHTS.get(cluster, MOOD_WEIGHTS)
         mood_weights = cluster_weights.get(mood, cluster_weights["balanced"])
+        
+        # Taste Profile Boost
+        user_ratings = df[df['user_id'] == user_id]
+        liked_types = []
+        for _, row in user_ratings.iterrows():
+            if row['rating'] >= 4:
+                info = next((d for d in dynamic_dishes if d["name"] == row['dish_name']), None)
+                if info: liked_types.append(info['type'])
+        top_liked = Counter(liked_types).most_common(1)[0][0] if liked_types else None
         
         scored_pool = []
         for d in dynamic_dishes:
@@ -175,6 +185,11 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
             
             base_score = mood_weights.get(d["type"], 0.5)
             
+            # Apply Taste Profile boost
+            if top_liked and d["type"] == top_liked:
+                base_score *= 1.5
+                
+            # Context multiplier
             if weather == 'rainy' or time_of_day == 'late_night':
                 if d["type"] in ['comfort', 'reward']: base_score *= 1.5
             elif weather == 'sunny' or time_of_day == 'morning':
@@ -187,7 +202,7 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         picks = [item[0] for item in scored_pool[:3]]
         
         results = [{"id": d["id"], "name": d["name"], "emoji": d["emoji"], "veg": d["veg"], "desc": ""} for d in picks]
-        return results, f"Cold Start: Cluster {cluster} + Context Scoring"
+        return results, f"Cold Start: Cluster {cluster} + Taste Profile + Context"
 
     # --- WARM START PATH (Collaborative Filtering) ---
     matrix = df.pivot_table(index='user_id', columns='dish_name', values='rating')
@@ -222,15 +237,14 @@ def get_live_ml_recommendations(user_id, mood, diet, time_of_day, weather):
         results_list.append({"id": info["id"], "name": item, "emoji": info["emoji"], "veg": info["veg"], "desc": ""})
         if len(results_list) == 3: break
         
-    # Smart padding if not enough recommendations
+    # Smart padding if CF wasn't enough
     if len(results_list) < 3:
         user_history = df[df['user_id'] == user_id]
         liked_types = []
         for _, row in user_history.iterrows():
             if row['rating'] >= 4:
                 dish_info = next((d for d in dynamic_dishes if d["name"] == row['dish_name']), None)
-                if dish_info:
-                    liked_types.append(dish_info['type'])
+                if dish_info: liked_types.append(dish_info['type'])
         
         if liked_types:
             top_preferred_type = Counter(liked_types).most_common(1)[0][0]
@@ -266,8 +280,7 @@ def onboarding():
     user_id = data.get('user_id')
     ratings = data.get('ratings', [])
     
-    # ⚠️ IMPORTANT: These 8 keys MUST match the order of the 8 columns in your CSV.
-    # Change 'q1', 'q2' to whatever your frontend is sending.
+    # 1. Build the 8-feature vector for K-Means clustering
     raw_features = [
         float(data.get('q1', 3.0)), 
         float(data.get('q2', 3.0)), 
@@ -279,20 +292,21 @@ def onboarding():
         float(data.get('q8', 3.0))
     ]
     
+    # 2. Calculate Z-scores and assign cluster
     assigned_cluster = assign_cluster(raw_features)
     
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Save the cluster
+        # 3. Save the cluster to DB
         cursor.execute('''
             INSERT INTO user_clusters (user_id, cluster) 
             VALUES (%s, %s) 
             ON CONFLICT (user_id) DO UPDATE SET cluster = EXCLUDED.cluster
         ''', (user_id, assigned_cluster))
         
-        # Save the food ratings
+        # 4. Save the food ratings (Taste Profile) to DB
         for item in ratings:
             cursor.execute('''
                 INSERT INTO feedback (user_id, dish_name, rating, mood) 
